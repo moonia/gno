@@ -1267,6 +1267,23 @@ func (m *Machine) Run(st Stage) {
 			m.Debug()
 		}
 		op := m.PopOp()
+		opIndex := 0
+		// test moonia
+		if op != OpHalt && op != OpInvalid {
+			funcName := "<unknown>"
+			if len(m.Frames) > 0 && m.Frames[len(m.Frames)-1].Func != nil {
+				funcName = string(m.Frames[len(m.Frames)-1].Func.Name)
+			}
+			
+			pos := Position{
+				File: "tests.gno",
+				Line: opIndex + 1,
+			}
+			
+			m.UpdateOpStats(op, opIndex, funcName, pos)
+			opIndex++
+		}
+		// test moonia
 		if bm.OpsEnabled {
 			// benchmark the operation.
 			bm.StartOpCode(byte(OpVoid))
