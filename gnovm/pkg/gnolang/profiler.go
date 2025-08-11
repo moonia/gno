@@ -2,9 +2,11 @@ package gnolang
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
-	// "github.com/google/pprof/profile"
+	"github.com/google/pprof/profile"
 )
 
 type OpStats struct {
@@ -20,15 +22,14 @@ type Position struct {
 }
 
 type OpTrace struct {
-	Op        Op        // the opcode executed
-	IndexOp   int       // the index of the opcode in the program
-	FuncName  string    // the function name in which the opcode was executed
-	SourcePos Position  // position in the source code (file + line)
+	Op        Op       // the opcode executed
+	IndexOp   int      // the index of the opcode in the program
+	FuncName  string   // the function name in which the opcode was executed
+	SourcePos Position // position in the source code (file + line)
 }
 
 var opStats = make(map[Op]*OpStats) // maps Op → stats
 var traces []OpTrace                // list of all opcode executions traced
-
 
 // getOpCPUCost returns the number of "CPU" cycles associated with a given opcode.
 func (m *Machine) getOpCPUCost(op Op) int64 {
@@ -405,4 +406,114 @@ func (m *Machine) PrintOpStats() {
 	fmt.Println(strings.Repeat("-", 70))
 	fmt.Printf("%-20s | %-10d | %-15d | %-10.2f\n",
 		"TOTAL", totalCount, totalCPU, float64(totalAlloc)/1024)
+
+	if err := ExportOpStatsToPprof("profile.pprof"); err != nil {
+		fmt.Println("Failed to export pprof:", err)
+	} else {
+		fmt.Println("[INFO] Profile saved to profile.pprof")
+	}
+
 }
+
+func ExportOpStatsToPprof(filename string) error {
+	prof := &profile.Profile{
+		TimeNanos:  time.Now().UnixNano(),
+		PeriodType: &profile.ValueType{Type: "cpu", Unit: "ns"},
+		Period:     1,
+		SampleType: []*profile.ValueType{
+			{Type: "cpu", Unit: "cycles"},
+			{Type: "alloc", Unit: "bytes"},
+			{Type: "count", Unit: "calls"},
+		},
+		// binary
+		Mapping: []*profile.Mapping{
+			{
+				ID:              1,
+				Start:           0x1000000,
+				Limit:           0x2000000,
+				Offset:          0,
+				File:            "gno-vm",
+				BuildID:         "gno-profiler",
+				HasFunctions:    true,
+				HasFilenames:    true,
+				HasLineNumbers:  true,
+				HasInlineFrames: true,
+			},
+		},
+	}
+
+	locationMap := make(map[string]*profile.Location)
+	functionMap := make(map[string]*profile.Function)
+
+	for i, trace := range traces {
+		_ = i
+		fnName := trace.FuncName
+		file := trace.SourcePos.File
+		line := trace.SourcePos.Line
+
+		// (skip if location info is incomplete)
+		if file == "" || line == 0 || fnName == "" {
+			continue
+		}
+
+		locKey := fmt.Sprintf("%s:%d", file, line)
+		loc, ok := locationMap[locKey]
+		if !ok {
+			fn, okFn := functionMap[fnName]
+			if !okFn {
+				fn = &profile.Function{
+					ID:        uint64(len(functionMap) + 1),
+					Name:      fnName,
+					Filename:  file,
+					StartLine: 1,
+				}
+				functionMap[fnName] = fn
+			}
+			loc = &profile.Location{
+				ID:      uint64(len(locationMap) + 1000),
+				Mapping: prof.Mapping[0], // associate to mapping
+				Line: []profile.Line{
+					{Function: fn, Line: int64(line)},
+				},
+			}
+			locationMap[locKey] = loc
+		}
+
+		stats := opStats[trace.Op]
+		if stats == nil {
+			continue
+		}
+
+		sample := &profile.Sample{
+			Location: []*profile.Location{loc},
+			Value: []int64{
+				stats.CumulativeCPU,
+				stats.Allocations,
+				stats.Count,
+			},
+		}
+		prof.Sample = append(prof.Sample, sample)
+	}
+
+	for _, fn := range functionMap {
+		prof.Function = append(prof.Function, fn)
+	}
+	for _, loc := range locationMap {
+		prof.Location = append(prof.Location, loc)
+	}
+
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return prof.Write(f)
+}
+
+// go tool pprof -raw profile.pprof > profile.txt
+
+// go tool pprof -raw profile.pprof | /Users/moonia/FlameGraph/stackcollapse-go.pl
+
+// /Users/moonia/FlameGraph/flamegraph.pl profile.txt > flamegraph.svg
+// TODO: fix Stack count is low (1). Did something go wrong? Ignored 552 lines with invalid format
